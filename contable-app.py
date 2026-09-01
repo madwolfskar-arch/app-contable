@@ -11,9 +11,8 @@ from pydantic import BaseModel, Field
 
 st.set_page_config(page_title="Procesador Contable", layout="wide")
 
-# API Key de Gemini incrustada directamente (oculta de la interfaz visual)
-API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6L0bRHiPJb-L0JO9g2mqbyclh1qJlWJmh6a1Yha5Fi65g")
-
+# Carga automáticamente desde los Secrets de Streamlit
+API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 class ComprobanteData(BaseModel):
     tipo_movimiento: str = Field(description="Ingreso o Egreso segun la naturaleza de la transaccion")
     concepto_factura: str = Field(description="Numero de factura o concepto tomado principalmente del nombre del archivo o del cuerpo del comprobante")
