@@ -143,6 +143,9 @@ if "df_resultados" in st.session_state and not st.session_state["df_resultados"]
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+
+        
+
         
 
 
