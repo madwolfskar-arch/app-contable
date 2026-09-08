@@ -1,8 +1,10 @@
-google-genai>=0.1.1
+```text
 streamlit
 pandas
-pillow
+Pillow
 pydantic
 openpyxl
+google-genai==2.22.0
+```
 
 
