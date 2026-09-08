@@ -1,6 +1,8 @@
+google-genai>=0.1.1
 streamlit
 pandas
 pillow
-google-genai
 pydantic
 openpyxl
+
+
