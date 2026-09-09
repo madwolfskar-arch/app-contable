@@ -1,4 +1,4 @@
-```python
+python
 import streamlit as st
 import pandas as pd
 
@@ -1323,7 +1323,6 @@ if (
         "automatizado del comprobante y deben ser verificados "
         "antes de su incorporación definitiva a la contabilidad."
     )
-```
 
 
 
