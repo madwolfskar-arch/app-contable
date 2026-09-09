@@ -1,9 +1,6 @@
-```text
 streamlit
 pandas
-pillow
+Pillow
 openpyxl
 pydantic
 google-genai
-```
-
