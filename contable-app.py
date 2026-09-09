@@ -1,14 +1,11 @@
 ```python
 import streamlit as st
 import pandas as pd
+
 from PIL import Image
 from io import BytesIO
 import time
 import re
-
-from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field, ValidationError
 
 
 # ============================================================
@@ -26,27 +23,129 @@ st.set_page_config(
 # CONFIGURACIÓN DE GEMINI
 # ============================================================
 
-# La API KEY debe estar exclusivamente en:
-# Streamlit Cloud → Settings → Secrets
+# IMPORTANTE:
+# La API KEY debe estar únicamente en:
+#
+# Streamlit Cloud
+# → Manage app
+# → Settings
+# → Secrets
 #
 # Formato:
-# GEMINI_API_KEY = "TU_NUEVA_API_KEY"
+#
+# GEMINI_API_KEY = "TU_API_KEY"
+#
+# ============================================================
 
-API_KEY = st.secrets.get("GEMINI_API_KEY", "").strip()
+try:
+    API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    API_KEY = str(API_KEY).strip()
+
+except Exception:
+    API_KEY = ""
+
+
+# ============================================================
+# IMPORTACIÓN SEGURA DEL SDK DE GEMINI
+# ============================================================
+
+try:
+
+    from google import genai
+    from google.genai import types
+
+    GEMINI_SDK_OK = True
+    GEMINI_SDK_ERROR = ""
+
+except Exception as e:
+
+    GEMINI_SDK_OK = False
+    GEMINI_SDK_ERROR = str(e)
+
+
+# ============================================================
+# PYDANTIC
+# ============================================================
+
+try:
+
+    from pydantic import BaseModel, Field, ValidationError
+
+    PYDANTIC_OK = True
+    PYDANTIC_ERROR = ""
+
+except Exception as e:
+
+    PYDANTIC_OK = False
+    PYDANTIC_ERROR = str(e)
+
+
+# ============================================================
+# MODELO GEMINI
+# ============================================================
+
+GEMINI_MODEL = "gemini-2.5-flash"
+
+
+# ============================================================
+# COMPROBACIÓN DE CONFIGURACIÓN
+# ============================================================
 
 if not API_KEY:
+
     st.error(
-        "❌ No se encontró GEMINI_API_KEY en los Secrets de Streamlit."
+        "❌ No se encontró GEMINI_API_KEY."
     )
+
     st.info(
-        "Configure la clave en: "
-        "Streamlit Cloud → Settings → Secrets"
+        """
+Configure la variable GEMINI_API_KEY en:
+
+Streamlit Cloud
+→ Manage app
+→ Settings
+→ Secrets
+"""
     )
+
     st.stop()
 
 
-# Modelo utilizado por la aplicación
-GEMINI_MODEL = "gemini-2.5-flash"
+if not GEMINI_SDK_OK:
+
+    st.error(
+        "❌ No fue posible cargar el SDK de Google Gemini."
+    )
+
+    st.code(
+        GEMINI_SDK_ERROR,
+        language="text"
+    )
+
+    st.info(
+        "Verifique que requirements.txt contenga el paquete "
+        "'google-genai'."
+    )
+
+    st.stop()
+
+
+if not PYDANTIC_OK:
+
+    st.error(
+        "❌ No fue posible cargar Pydantic."
+    )
+
+    st.code(
+        PYDANTIC_ERROR,
+        language="text"
+    )
+
+    st.info(
+        "Verifique que requirements.txt contenga 'pydantic'."
+    )
+
+    st.stop()
 
 
 # ============================================================
@@ -54,31 +153,33 @@ GEMINI_MODEL = "gemini-2.5-flash"
 # ============================================================
 
 class ComprobanteData(BaseModel):
+
     tipo_movimiento: str = Field(
         description=(
-            "Tipo de movimiento contable. Debe ser Ingreso o Egreso."
+            "Tipo de movimiento contable. "
+            "Debe ser Ingreso o Egreso."
         )
     )
 
     concepto_factura: str = Field(
         description=(
-            "Número de factura, concepto o identificación principal "
-            "del comprobante. Utilizar principalmente el nombre del "
-            "archivo y el contenido visible del comprobante."
+            "Número de factura, concepto o identificación "
+            "principal del comprobante."
         )
     )
 
     destinatario_remitente: str = Field(
         description=(
-            "Nombre o identificación de la persona, empresa, comercio "
-            "o entidad receptora/emisora de la operación."
+            "Nombre o identificación de la persona, empresa, "
+            "comercio o entidad receptora/emisora."
         )
     )
 
     monto_cop: float = Field(
         description=(
-            "Valor numérico total de la transacción en pesos colombianos "
-            "(COP), sin símbolo de moneda, puntos ni separadores."
+            "Valor total de la transacción en pesos colombianos "
+            "(COP), expresado como número sin símbolo monetario "
+            "ni separadores."
         )
     )
 
@@ -86,7 +187,7 @@ class ComprobanteData(BaseModel):
         description=(
             "Fecha y hora de la transacción en formato "
             "YYYY-MM-DD HH:MM. Si la hora no aparece, utilizar "
-            "00:00 y conservar la fecha identificada."
+            "00:00."
         )
     )
 
@@ -99,15 +200,15 @@ class ComprobanteData(BaseModel):
 
     banco_plataforma: str = Field(
         description=(
-            "Entidad financiera o plataforma de origen/destino. "
-            "Ejemplos: Nequi, Davivienda, Nu, Bancolombia, Bre-B."
+            "Entidad financiera o plataforma de origen/destino."
         )
     )
 
     medio_pago_tipo: str = Field(
         description=(
-            "Medio o tipo de operación. Ejemplos: Transferencia, "
-            "QR, Llave, Pago de servicios, depósito, etc."
+            "Medio o tipo de operación. "
+            "Ejemplos: Transferencia, QR, Llave, "
+            "Pago de servicios, depósito, etc."
         )
     )
 
@@ -117,56 +218,51 @@ class ComprobanteData(BaseModel):
 # ============================================================
 
 def limpiar_texto(valor):
-    """
-    Convierte valores nulos o espacios innecesarios
-    en texto limpio.
-    """
+
     if valor is None:
         return ""
 
     return str(valor).strip()
 
 
-def validar_resultado(data: ComprobanteData, tipo_seleccionado: str):
-    """
-    Realiza validaciones básicas antes de incorporar
-    el comprobante al consolidado.
-    """
+# ============================================================
+# VALIDAR RESULTADO
+# ============================================================
+
+def validar_resultado(
+    data: ComprobanteData,
+    tipo_seleccionado: str
+):
 
     errores = []
 
-    # --------------------------------------------------------
-    # Validar tipo de movimiento
-    # --------------------------------------------------------
+    tipo = limpiar_texto(
+        data.tipo_movimiento
+    ).lower()
 
-    tipo = limpiar_texto(data.tipo_movimiento).lower()
+    if tipo not in [
+        "ingreso",
+        "egreso"
+    ]:
 
-    if tipo not in ["ingreso", "egreso"]:
         errores.append(
-            f"Tipo de movimiento no válido: {data.tipo_movimiento}"
+            f"Tipo de movimiento no válido: "
+            f"{data.tipo_movimiento}"
         )
 
-    # Si el usuario seleccionó un tipo, lo usamos como
-    # referencia de control.
     if tipo != tipo_seleccionado.lower():
+
         errores.append(
             f"El comprobante fue clasificado como "
-            f"'{data.tipo_movimiento}', pero el usuario seleccionó "
-            f"'{tipo_seleccionado}'."
+            f"'{data.tipo_movimiento}', pero el usuario "
+            f"seleccionó '{tipo_seleccionado}'."
         )
 
-    # --------------------------------------------------------
-    # Validar monto
-    # --------------------------------------------------------
-
     if data.monto_cop < 0:
+
         errores.append(
             "El monto de la transacción no puede ser negativo."
         )
-
-    # --------------------------------------------------------
-    # Validar fecha
-    # --------------------------------------------------------
 
     fecha_validada = pd.to_datetime(
         data.fecha_hora,
@@ -174,24 +270,23 @@ def validar_resultado(data: ComprobanteData, tipo_seleccionado: str):
     )
 
     if pd.isna(fecha_validada):
+
         errores.append(
-            f"Fecha/hora no válida: {data.fecha_hora}"
+            f"Fecha/hora no válida: "
+            f"{data.fecha_hora}"
         )
 
     return errores
 
 
-def obtener_espera(error_msg, intento):
-    """
-    Determina cuánto tiempo esperar ante un error 429.
+# ============================================================
+# CALCULAR ESPERA PARA ERRORES 429
+# ============================================================
 
-    Primero intenta obtener el tiempo indicado por Gemini.
-    Si no existe, utiliza backoff progresivo.
-    """
-
-    # Busca expresiones como:
-    # retry in 12.5s
-    # retry in 30s
+def obtener_espera(
+    error_msg,
+    intento
+):
 
     match = re.search(
         r"retry in\s+(\d+(?:\.\d+)?)s",
@@ -200,19 +295,27 @@ def obtener_espera(error_msg, intento):
     )
 
     if match:
-        espera = float(match.group(1)) + 2
+
+        espera = (
+            float(match.group(1))
+            + 2
+        )
+
     else:
-        # Backoff progresivo:
-        # 10, 20, 40, 60...
-        espera = min(60, 10 * (2 ** intento))
+
+        espera = min(
+            60,
+            10 * (2 ** intento)
+        )
 
     return espera
 
 
+# ============================================================
+# CLASIFICAR ERROR
+# ============================================================
+
 def clasificar_error(error_msg):
-    """
-    Clasifica errores frecuentes de la API de Gemini.
-    """
 
     mensaje = error_msg.lower()
 
@@ -222,21 +325,27 @@ def clasificar_error(error_msg):
         or "invalid api key" in mensaje
         or "api key not valid" in mensaje
     ):
+
         return "AUTH"
+
 
     if (
         "403" in mensaje
         or "permission_denied" in mensaje
         or "permission denied" in mensaje
     ):
+
         return "PERMISSION"
+
 
     if (
         "429" in mensaje
         or "resource_exhausted" in mensaje
         or "quota" in mensaje
     ):
+
         return "QUOTA"
+
 
     if (
         "timeout" in mensaje
@@ -246,10 +355,16 @@ def clasificar_error(error_msg):
         or "502" in mensaje
         or "500" in mensaje
     ):
+
         return "TEMPORARY"
+
 
     return "OTHER"
 
+
+# ============================================================
+# PROCESAR COMPROBANTE
+# ============================================================
 
 def procesar_comprobante(
     client,
@@ -257,103 +372,182 @@ def procesar_comprobante(
     nombre_archivo,
     tipo_movimiento
 ):
-    """
-    Envía un comprobante a Gemini y devuelve
-    un objeto ComprobanteData.
-    """
 
     prompt = f"""
 Analiza detalladamente este comprobante bancario.
 
 CONTEXTO:
-- El usuario ha indicado que este archivo corresponde a un:
-  {tipo_movimiento}
-- Nombre original del archivo:
-  "{nombre_archivo}"
+
+El usuario ha indicado que este archivo corresponde a:
+
+{tipo_movimiento}
+
+Nombre original del archivo:
+
+"{nombre_archivo}"
+
 
 OBJETIVO:
-Extrae exclusivamente la información que pueda ser identificada
-en el comprobante.
+
+Extrae exclusivamente la información que pueda ser
+identificada claramente en el comprobante.
+
 
 REGLAS IMPORTANTES:
 
 1. No inventes información.
-2. Si un campo no aparece claramente, utiliza "No identificado".
-3. El monto debe corresponder al valor real de la operación.
-4. El monto debe expresarse como número en COP, sin símbolo de moneda,
-   puntos ni separadores.
+
+2. Si un campo no aparece claramente, utiliza:
+   "No identificado".
+
+3. El monto debe corresponder al valor real
+   de la operación.
+
+4. El monto debe expresarse como número en COP,
+   sin símbolo de moneda, puntos ni separadores.
+
 5. La fecha debe convertirse al formato:
+
    YYYY-MM-DD HH:MM
-6. Si la hora no está visible, utiliza 00:00.
-7. Identifica correctamente la entidad financiera o plataforma.
-8. Identifica la referencia, autorización o ID de operación cuando exista.
-9. Conserva el concepto o número de factura cuando sea visible.
-10. Usa el nombre del archivo como apoyo para identificar el comprobante,
-    pero no reemplaces información visible por una suposición.
-11. No confundas el número de factura con el número de autorización,
-    referencia o ID de operación.
+
+6. Si la hora no está visible, utiliza:
+
+   00:00
+
+7. Identifica correctamente la entidad financiera
+   o plataforma.
+
+8. Identifica la referencia, autorización o ID
+   de operación cuando exista.
+
+9. Conserva el concepto o número de factura
+   cuando sea visible.
+
+10. Usa el nombre del archivo como apoyo,
+    pero no sustituyas información visible
+    por una suposición.
+
+11. No confundas número de factura con número
+    de autorización, referencia o ID.
+
 12. Devuelve únicamente la estructura solicitada.
 """
 
+
     max_intentos = 5
+
 
     for intento in range(max_intentos):
 
         try:
 
             response = client.models.generate_content(
+
                 model=GEMINI_MODEL,
+
                 contents=[
                     image,
                     prompt
                 ],
+
                 config=types.GenerateContentConfig(
+
                     response_mime_type="application/json",
+
                     response_schema=ComprobanteData,
+
                     temperature=0.1
+
                 )
             )
 
-            # ------------------------------------------------
-            # Intentar utilizar la respuesta estructurada
-            # proporcionada por el SDK.
-            # ------------------------------------------------
 
-            if getattr(response, "parsed", None) is not None:
+            # ==================================================
+            # RESPUESTA ESTRUCTURADA
+            # ==================================================
 
-                parsed = response.parsed
+            parsed = getattr(
+                response,
+                "parsed",
+                None
+            )
 
-                if isinstance(parsed, ComprobanteData):
+
+            if parsed is not None:
+
+                if isinstance(
+                    parsed,
+                    ComprobanteData
+                ):
+
                     data = parsed
+
                 else:
-                    data = ComprobanteData.model_validate(parsed)
+
+                    data = (
+                        ComprobanteData
+                        .model_validate(parsed)
+                    )
+
 
             else:
 
-                # Compatibilidad con respuestas donde parsed
-                # no esté disponible.
-                data = ComprobanteData.model_validate_json(
-                    response.text
+                texto_respuesta = getattr(
+                    response,
+                    "text",
+                    ""
                 )
 
+
+                if not texto_respuesta:
+
+                    return (
+                        None,
+                        "Gemini no devolvió contenido."
+                    )
+
+
+                data = (
+                    ComprobanteData
+                    .model_validate_json(
+                        texto_respuesta
+                    )
+                )
+
+
             return data, None
+
+
+        # ======================================================
+        # ERROR DE VALIDACIÓN
+        # ======================================================
 
         except ValidationError as e:
 
             return (
                 None,
-                "La respuesta de Gemini no pudo validarse "
-                f"contra el esquema contable: {e}"
+                "La respuesta de Gemini no pudo "
+                "validarse contra el esquema contable: "
+                f"{e}"
             )
+
+
+        # ======================================================
+        # OTROS ERRORES
+        # ======================================================
 
         except Exception as e:
 
             error_msg = str(e)
-            categoria = clasificar_error(error_msg)
 
-            # ------------------------------------------------
-            # ERROR DE AUTENTICACIÓN
-            # ------------------------------------------------
+            categoria = clasificar_error(
+                error_msg
+            )
+
+
+            # --------------------------------------------------
+            # AUTENTICACIÓN
+            # --------------------------------------------------
 
             if categoria == "AUTH":
 
@@ -363,9 +557,10 @@ REGLAS IMPORTANTES:
                     "Verifique GEMINI_API_KEY en Streamlit Secrets."
                 )
 
-            # ------------------------------------------------
-            # ERROR DE PERMISOS
-            # ------------------------------------------------
+
+            # --------------------------------------------------
+            # PERMISOS
+            # --------------------------------------------------
 
             if categoria == "PERMISSION":
 
@@ -373,12 +568,13 @@ REGLAS IMPORTANTES:
                     None,
                     "❌ Gemini rechazó la solicitud por permisos. "
                     "Revise el proyecto de Google Cloud asociado "
-                    "a la API key y el acceso a Gemini API."
+                    "a la API key."
                 )
 
-            # ------------------------------------------------
-            # ERROR DE CUOTA
-            # ------------------------------------------------
+
+            # --------------------------------------------------
+            # CUOTA
+            # --------------------------------------------------
 
             if categoria == "QUOTA":
 
@@ -392,22 +588,27 @@ REGLAS IMPORTANTES:
                     st.warning(
                         f"⏳ Límite de cuota para "
                         f"'{nombre_archivo}'. "
-                        f"Reintentando en {espera:.0f} segundos..."
+                        f"Reintentando en "
+                        f"{espera:.0f} segundos..."
                     )
 
-                    time.sleep(espera)
+                    time.sleep(
+                        espera
+                    )
 
                     continue
 
+
                 return (
                     None,
-                    "❌ Se agotó la cuota disponible de Gemini "
-                    "después de varios intentos."
+                    "❌ Se agotó la cuota disponible "
+                    "de Gemini después de varios intentos."
                 )
 
-            # ------------------------------------------------
+
+            # --------------------------------------------------
             # ERROR TEMPORAL
-            # ------------------------------------------------
+            # --------------------------------------------------
 
             if categoria == "TEMPORARY":
 
@@ -421,12 +622,16 @@ REGLAS IMPORTANTES:
                     st.warning(
                         f"⚠️ Error temporal procesando "
                         f"'{nombre_archivo}'. "
-                        f"Reintentando en {espera} segundos..."
+                        f"Reintentando en "
+                        f"{espera} segundos..."
                     )
 
-                    time.sleep(espera)
+                    time.sleep(
+                        espera
+                    )
 
                     continue
+
 
                 return (
                     None,
@@ -434,19 +639,23 @@ REGLAS IMPORTANTES:
                     "correctamente después de varios intentos."
                 )
 
-            # ------------------------------------------------
+
+            # --------------------------------------------------
             # OTROS ERRORES
-            # ------------------------------------------------
+            # --------------------------------------------------
 
             return (
                 None,
-                f"❌ Error procesando '{nombre_archivo}': "
+                f"❌ Error procesando "
+                f"'{nombre_archivo}': "
                 f"{error_msg}"
             )
 
+
     return (
         None,
-        f"❌ No fue posible procesar '{nombre_archivo}'."
+        f"❌ No fue posible procesar "
+        f"'{nombre_archivo}'."
     )
 
 
@@ -454,7 +663,10 @@ REGLAS IMPORTANTES:
 # INTERFAZ PRINCIPAL
 # ============================================================
 
-st.title("📊 Procesador Contable de Comprobantes")
+st.title(
+    "📊 Procesador Contable de Comprobantes"
+)
+
 
 st.markdown(
     """
@@ -507,9 +719,10 @@ if st.button(
 
         st.stop()
 
-    # --------------------------------------------------------
-    # Crear cliente Gemini
-    # --------------------------------------------------------
+
+    # ========================================================
+    # CREAR CLIENTE GEMINI
+    # ========================================================
 
     try:
 
@@ -520,7 +733,8 @@ if st.button(
     except Exception as e:
 
         st.error(
-            "❌ No fue posible inicializar el cliente de Gemini."
+            "❌ No fue posible inicializar "
+            "el cliente de Gemini."
         )
 
         st.exception(e)
@@ -532,102 +746,131 @@ if st.button(
 
     errores_archivos = []
 
-    progress_bar = st.progress(0)
+    progress_bar = st.progress(
+        0
+    )
 
     estado = st.empty()
 
 
     # ========================================================
-    # PROCESAR CADA ARCHIVO
+    # PROCESAR ARCHIVOS
     # ========================================================
 
-    for idx, uploaded_file in enumerate(uploaded_files):
+    for idx, uploaded_file in enumerate(
+        uploaded_files
+    ):
 
-        nombre_archivo = uploaded_file.name
+        nombre_archivo = (
+            uploaded_file.name
+        )
+
 
         estado.info(
             f"🔎 Analizando {idx + 1} de "
-            f"{len(uploaded_files)}: {nombre_archivo}"
+            f"{len(uploaded_files)}: "
+            f"{nombre_archivo}"
         )
+
 
         try:
 
-            # -----------------------------------------------
-            # Abrir imagen
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # ABRIR IMAGEN
+            # ------------------------------------------------
 
             image = Image.open(
                 uploaded_file
             )
 
-            # -----------------------------------------------
-            # Convertir a RGB cuando sea necesario.
-            # -----------------------------------------------
 
-            if image.mode not in ["RGB", "L"]:
+            # ------------------------------------------------
+            # NORMALIZAR IMAGEN
+            # ------------------------------------------------
 
-                image = image.convert("RGB")
+            if image.mode != "RGB":
+
+                image = image.convert(
+                    "RGB"
+                )
 
 
-            # -----------------------------------------------
-            # Procesar con Gemini
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # PROCESAR
+            # ------------------------------------------------
 
             data, error = procesar_comprobante(
+
                 client=client,
+
                 image=image,
+
                 nombre_archivo=nombre_archivo,
+
                 tipo_movimiento=tipo
+
             )
 
 
-            # -----------------------------------------------
-            # Resultado exitoso
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # RESULTADO EXITOSO
+            # ------------------------------------------------
 
             if data is not None:
 
-                errores_validacion = validar_resultado(
-                    data,
-                    tipo
+                errores_validacion = (
+                    validar_resultado(
+                        data,
+                        tipo
+                    )
                 )
+
 
                 if errores_validacion:
 
-                    # El dato puede ser útil, pero no debemos
-                    # ocultar la discrepancia.
                     st.warning(
-                        f"⚠️ Advertencia en {nombre_archivo}: "
-                        + " | ".join(errores_validacion)
+                        f"⚠️ Advertencia en "
+                        f"{nombre_archivo}: "
+                        + " | ".join(
+                            errores_validacion
+                        )
                     )
 
 
-                resultado = data.model_dump()
+                resultado = (
+                    data.model_dump()
+                )
 
-                # Guardamos también el nombre real del archivo
-                # como trazabilidad.
-                resultado["archivo_origen"] = nombre_archivo
+
+                resultado[
+                    "archivo_origen"
+                ] = nombre_archivo
+
 
                 resultados.append(
                     resultado
                 )
 
 
-            # -----------------------------------------------
-            # Error
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # ERROR
+            # ------------------------------------------------
 
             else:
 
                 errores_archivos.append(
                     {
-                        "archivo": nombre_archivo,
-                        "error": error
+                        "archivo":
+                            nombre_archivo,
+
+                        "error":
+                            error
                     }
                 )
 
+
                 st.error(
-                    f"{error}"
+                    error
                 )
 
 
@@ -635,10 +878,14 @@ if st.button(
 
             errores_archivos.append(
                 {
-                    "archivo": nombre_archivo,
-                    "error": str(e)
+                    "archivo":
+                        nombre_archivo,
+
+                    "error":
+                        str(e)
                 }
             )
+
 
             st.error(
                 f"❌ No fue posible abrir o procesar "
@@ -647,11 +894,12 @@ if st.button(
 
 
         # ----------------------------------------------------
-        # Actualizar progreso
+        # PROGRESO
         # ----------------------------------------------------
 
         progress_bar.progress(
-            (idx + 1) / len(uploaded_files)
+            (idx + 1)
+            / len(uploaded_files)
         )
 
 
@@ -664,9 +912,12 @@ if st.button(
 
     if resultados:
 
-        st.session_state["df_resultados"] = pd.DataFrame(
+        st.session_state[
+            "df_resultados"
+        ] = pd.DataFrame(
             resultados
         )
+
 
         st.success(
             f"✅ Procesamiento completado. "
@@ -680,6 +931,7 @@ if st.button(
             f"⚠️ {len(errores_archivos)} archivo(s) "
             f"presentaron problemas."
         )
+
 
         with st.expander(
             "Ver detalle de errores"
@@ -697,30 +949,37 @@ if st.button(
 
 
 # ============================================================
-# VISUALIZACIÓN DE RESULTADOS
+# VISUALIZACIÓN
 # ============================================================
 
 if (
     "df_resultados" in st.session_state
-    and not st.session_state["df_resultados"].empty
+    and not st.session_state[
+        "df_resultados"
+    ].empty
 ):
 
-    df = st.session_state[
-        "df_resultados"
-    ].copy()
+    df = (
+        st.session_state[
+            "df_resultados"
+        ].copy()
+    )
 
 
     # ========================================================
-    # CONVERSIÓN DE FECHAS
+    # FECHAS
     # ========================================================
 
-    df["fecha_dt"] = pd.to_datetime(
-        df["fecha_hora"],
-        errors="coerce"
-    ).dt.date
+    df["fecha_dt"] = (
+        pd.to_datetime(
+            df["fecha_hora"],
+            errors="coerce"
+        ).dt.date
+    )
 
 
     st.markdown("---")
+
 
     st.subheader(
         "🔍 Filtros y Resumen Financiero"
@@ -731,8 +990,8 @@ if (
     # FILTROS
     # ========================================================
 
-    col_filtro1, col_filtro2 = st.columns(
-        [2, 2]
+    col_filtro1, col_filtro2 = (
+        st.columns(2)
     )
 
 
@@ -744,6 +1003,7 @@ if (
             .unique()
         )
 
+
         if len(fechas_unicas) > 0:
 
             min_date = min(
@@ -754,8 +1014,11 @@ if (
                 fechas_unicas
             )
 
+
             rango_fechas = st.date_input(
+
                 "Filtrar por Fecha (Inicio y Fin)",
+
                 value=(
                     min_date,
                     max_date
@@ -781,17 +1044,23 @@ if (
 
         if len(rango_fechas) == 2:
 
-            f_inicio, f_fin = rango_fechas
+            f_inicio, f_fin = (
+                rango_fechas
+            )
+
 
             df_filtrado = df[
                 (
-                    df["fecha_dt"] >= f_inicio
+                    df["fecha_dt"]
+                    >= f_inicio
                 )
                 &
                 (
-                    df["fecha_dt"] <= f_fin
+                    df["fecha_dt"]
+                    <= f_fin
                 )
             ]
+
 
         elif len(rango_fechas) == 1:
 
@@ -799,6 +1068,7 @@ if (
                 df["fecha_dt"]
                 == rango_fechas[0]
             ]
+
 
         else:
 
@@ -810,13 +1080,17 @@ if (
 
 
     # ========================================================
-    # TOTALIZADORES
+    # TOTAL
     # ========================================================
 
-    monto_total = pd.to_numeric(
-        df_filtrado["monto_cop"],
-        errors="coerce"
-    ).fillna(0).sum()
+    monto_total = (
+        pd.to_numeric(
+            df_filtrado["monto_cop"],
+            errors="coerce"
+        )
+        .fillna(0)
+        .sum()
+    )
 
 
     cantidad_transacciones = len(
@@ -824,8 +1098,8 @@ if (
     )
 
 
-    col_m1, col_m2 = st.columns(
-        2
+    col_m1, col_m2 = (
+        st.columns(2)
     )
 
 
@@ -837,42 +1111,57 @@ if (
 
     col_m2.metric(
         "📋 Transacciones Filtradas",
-        f"{cantidad_transacciones}"
+        str(cantidad_transacciones)
     )
 
 
     # ========================================================
-    # ORDEN DE COLUMNAS
+    # COLUMNAS
     # ========================================================
 
     columnas_orden = [
+
         "tipo_movimiento",
+
         "concepto_factura",
+
         "monto_cop",
+
         "fecha_hora",
+
         "referencia_operacion",
+
         "banco_plataforma",
+
         "medio_pago_tipo",
+
         "destinatario_remitente",
+
         "archivo_origen"
+
     ]
 
 
-    # Solo utilizar columnas existentes.
     columnas_disponibles = [
+
         columna
+
         for columna in columnas_orden
+
         if columna in df_filtrado.columns
+
     ]
 
 
-    df_display = df_filtrado[
-        columnas_disponibles
-    ].copy()
+    df_display = (
+        df_filtrado[
+            columnas_disponibles
+        ].copy()
+    )
 
 
     # ========================================================
-    # NOMBRES VISIBLES
+    # NOMBRES
     # ========================================================
 
     nombres_columnas = {
@@ -903,11 +1192,14 @@ if (
 
         "archivo_origen":
             "Archivo Origen"
+
     }
 
 
-    df_display = df_display.rename(
-        columns=nombres_columnas
+    df_display = (
+        df_display.rename(
+            columns=nombres_columnas
+        )
     )
 
 
@@ -923,7 +1215,7 @@ if (
 
 
     # ========================================================
-    # EXPORTACIÓN A EXCEL
+    # EXCEL
     # ========================================================
 
     excel_buffer = BytesIO()
@@ -941,35 +1233,45 @@ if (
         )
 
 
-        # ----------------------------------------------------
-        # Ajustar ancho de columnas
-        # ----------------------------------------------------
-
-        worksheet = writer.sheets[
-            "Consolidado"
-        ]
+        worksheet = (
+            writer.sheets[
+                "Consolidado"
+            ]
+        )
 
 
-        for column_cells in worksheet.columns:
+        for column_cells in (
+            worksheet.columns
+        ):
 
             max_length = 0
+
 
             column_letter = (
                 column_cells[0]
                 .column_letter
             )
 
+
             for cell in column_cells:
 
                 try:
 
                     cell_length = len(
-                        str(cell.value)
+                        str(
+                            cell.value
+                        )
                     )
 
-                    if cell_length > max_length:
 
-                        max_length = cell_length
+                    if (
+                        cell_length
+                        > max_length
+                    ):
+
+                        max_length = (
+                            cell_length
+                        )
 
                 except Exception:
 
@@ -979,7 +1281,10 @@ if (
             worksheet.column_dimensions[
                 column_letter
             ].width = min(
-                max(max_length + 2, 12),
+                max(
+                    max_length + 2,
+                    12
+                ),
                 45
             )
 
@@ -988,9 +1293,20 @@ if (
 
 
     st.download_button(
-        label="📥 Descargar Consolidado Filtrado en Excel",
-        data=excel_buffer.getvalue(),
-        file_name="Consolidado_Contable.xlsx",
+
+        label=(
+            "📥 Descargar Consolidado "
+            "Filtrado en Excel"
+        ),
+
+        data=(
+            excel_buffer.getvalue()
+        ),
+
+        file_name=(
+            "Consolidado_Contable.xlsx"
+        ),
+
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
@@ -999,7 +1315,7 @@ if (
 
 
     # ========================================================
-    # INFORMACIÓN DE TRAZABILIDAD
+    # TRAZABILIDAD
     # ========================================================
 
     st.caption(
