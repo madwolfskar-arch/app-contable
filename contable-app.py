@@ -88,6 +88,14 @@ def limpiar_cadena(texto):
     return str(texto).strip()
 
 
+def obtener_tiempo_espera(error_msg):
+    """Extrae el tiempo de espera recomendado desde la respuesta de error de Gemini."""
+    match = re.search(r"retry in\s+(\d+(?:\.\d+)?)s", str(error_msg), re.IGNORECASE)
+    if match:
+        return float(match.group(1)) + 2.0
+    return 35.0  # Tiempo base de espera si no se encuentra en el texto
+
+
 def procesar_comprobante(client, image, nombre_archivo, tipo_movimiento, tienda_predeterminada=""):
     prompt = f"""
 Analiza detalladamente la imagen del comprobante.
@@ -102,25 +110,40 @@ INSTRUCCIONES:
 3. Fecha en formato YYYY-MM-DD HH:MM.
 4. Si un dato no existe, coloca "No identificado".
 """
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[image, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ComprobanteData,
-                temperature=0.1
+    max_intentos = 3
+
+    for intento in range(max_intentos):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[image, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ComprobanteData,
+                    temperature=0.1
+                )
             )
-        )
-        parsed = getattr(response, "parsed", None)
-        if parsed is not None:
-            data = parsed if isinstance(parsed, ComprobanteData) else ComprobanteData.model_validate(parsed)
-        else:
-            texto_respuesta = getattr(response, "text", "")
-            data = ComprobanteData.model_validate_json(texto_respuesta)
-        return data, None
-    except Exception as e:
-        return None, str(e)
+            parsed = getattr(response, "parsed", None)
+            if parsed is not None:
+                data = parsed if isinstance(parsed, ComprobanteData) else ComprobanteData.model_validate(parsed)
+            else:
+                texto_respuesta = getattr(response, "text", "")
+                data = ComprobanteData.model_validate_json(texto_respuesta)
+            return data, None
+
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                if intento < max_intentos - 1:
+                    espera = obtener_tiempo_espera(error_str)
+                    st.warning(f"⚠️ Límite de tasa detectado en '{nombre_archivo}'. Esperando {espera:.1f} segundos...")
+                    time.sleep(espera)
+                    continue
+                else:
+                    return None, f"❌ Cuota diaria o de tasa excedida (429 RESOURCE_EXHAUSTED). Intente más tarde o revise su plan en Google AI Studio."
+            return None, error_str
+
+    return None, f"❌ No se pudo procesar la imagen '{nombre_archivo}'."
 
 
 def generar_excel_estructurado(df):
@@ -131,7 +154,6 @@ def generar_excel_estructurado(df):
         workbook = writer.book
         worksheet = writer.sheets['Metadatos Comprobantes']
 
-        # Estilos visuales
         formato_header = workbook.add_format({
             'bold': True,
             'text_wrap': True,
@@ -144,11 +166,8 @@ def generar_excel_estructurado(df):
         formato_celda = workbook.add_format({'valign': 'top', 'border': 1})
         formato_moneda = workbook.add_format({'num_format': '$#,##0', 'valign': 'top', 'border': 1})
 
-        # Aplicar encabezados y ajuste dinámico de columnas
         for col_num, col_name in enumerate(df.columns):
             worksheet.write(0, col_num, col_name, formato_header)
-            
-            # Ancho óptimo según el contenido
             max_len = max(df[col_name].astype(str).map(len).max(), len(col_name)) + 3
             max_len = min(max_len, 50)
             
@@ -202,13 +221,14 @@ def main():
                 elif data:
                     res_dict = data.model_dump()
                     res_dict["archivo_origen"] = archivo.name
-                    # Limpieza de caracteres y saltos de línea destructivos
                     res_dict = {k: limpiar_cadena(v) if isinstance(v, str) else v for k, v in res_dict.items()}
                     resultados.append(res_dict)
             except Exception as ex:
                 st.error(f"Error abriendo '{archivo.name}': {ex}")
 
             progreso.progress((idx + 1) / total)
+            # Pausa de 3 segundos entre archivos para evitar exceder el límite por minuto
+            time.sleep(3)
 
         status.text("✅ Procesamiento completado.")
 
@@ -226,7 +246,6 @@ def main():
             st.subheader("📋 Datos Extraídos")
             st.dataframe(df_resultados, use_container_width=True)
 
-            # Generar único archivo Excel estructurado
             excel_bytes = generar_excel_estructurado(df_resultados)
             
             st.download_button(
@@ -240,7 +259,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+
+
 
     
 
