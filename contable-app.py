@@ -4,7 +4,6 @@ from PIL import Image
 from io import BytesIO
 import time
 import re
-import json
 
 # ============================================================
 # CONFIGURACIÓN GENERAL DE LA PÁGINA
@@ -78,27 +77,16 @@ class ComprobanteData(BaseModel):
 
 
 # ============================================================
-# FUNCIONES AUXILIARES DE LIMPIEZA Y PROCESAMIENTO
+# FUNCIONES AUXILIARES
 # ============================================================
 
 def limpiar_cadena(texto):
-    """Elimina saltos de línea y espacios dobles que rompen la lectura en Excel."""
+    """Elimina saltos de línea y espacios múltiples para evitar celdas desestructuradas."""
     if not isinstance(texto, str):
         return texto
-    texto = re.sub(r'[\r\n]+', ' ', texto)  # Reemplaza saltos de línea por espacios
+    texto = re.sub(r'[\r\n]+', ' ', texto)
     return str(texto).strip()
 
-def clasificar_error(error_msg):
-    mensaje = str(error_msg).lower()
-    if any(k in mensaje for k in ["401", "unauthenticated", "invalid api key"]):
-        return "AUTH"
-    if any(k in mensaje for k in ["403", "permission_denied"]):
-        return "PERMISSION"
-    if any(k in mensaje for k in ["429", "resource_exhausted", "quota"]):
-        return "QUOTA"
-    if any(k in mensaje for k in ["timeout", "connection", "503", "502", "500"]):
-        return "TEMPORARY"
-    return "OTHER"
 
 def procesar_comprobante(client, image, nombre_archivo, tipo_movimiento, tienda_predeterminada=""):
     prompt = f"""
@@ -109,8 +97,8 @@ DATOS DE REFERENCIA:
 - Establecimiento sugerido: "{tienda_predeterminada}"
 
 INSTRUCCIONES:
-1. Extrae únicamente datos visibles.
-2. Monto numérico en COP (sin símbolos ni puntos de miles).
+1. Extrae únicamente datos visibles y verificables.
+2. Monto numérico en COP (sin símbolos monetarios ni puntos de miles).
 3. Fecha en formato YYYY-MM-DD HH:MM.
 4. Si un dato no existe, coloca "No identificado".
 """
@@ -135,19 +123,20 @@ INSTRUCCIONES:
         return None, str(e)
 
 
-def generar_excel_formateado(df):
-    """Genera un buffer binario de Excel (.xlsx) ajustando anchos de columna y codificación."""
+def generar_excel_estructurado(df):
+    """Genera un archivo de Excel (.xlsx) estructurado con formatos y auto-ancho."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Comprobantes')
+        df.to_excel(writer, index=False, sheet_name='Metadatos Comprobantes')
         workbook = writer.book
-        worksheet = writer.sheets['Comprobantes']
+        worksheet = writer.sheets['Metadatos Comprobantes']
 
-        # Formatos
+        # Estilos visuales
         formato_header = workbook.add_format({
             'bold': True,
             'text_wrap': True,
-            'valign': 'top',
+            'valign': 'vcenter',
+            'align': 'center',
             'fg_color': '#1F4E78',
             'font_color': '#FFFFFF',
             'border': 1
@@ -155,14 +144,16 @@ def generar_excel_formateado(df):
         formato_celda = workbook.add_format({'valign': 'top', 'border': 1})
         formato_moneda = workbook.add_format({'num_format': '$#,##0', 'valign': 'top', 'border': 1})
 
-        # Dar formato a encabezados y auto-ajustar anchos
+        # Aplicar encabezados y ajuste dinámico de columnas
         for col_num, col_name in enumerate(df.columns):
             worksheet.write(0, col_num, col_name, formato_header)
+            
+            # Ancho óptimo según el contenido
             max_len = max(df[col_name].astype(str).map(len).max(), len(col_name)) + 3
-            max_len = min(max_len, 50)  # Límite máximo de ancho
+            max_len = min(max_len, 50)
             
             if col_name == 'monto_cop':
-                worksheet.set_column(col_num, col_num, 15, formato_moneda)
+                worksheet.set_column(col_num, col_num, 16, formato_moneda)
             else:
                 worksheet.set_column(col_num, col_num, max_len, formato_celda)
 
@@ -170,12 +161,12 @@ def generar_excel_formateado(df):
 
 
 # ============================================================
-# INTERFAZ PRINCIPAL DE STREAMLIT
+# INTERFAZ PRINCIPAL EN STREAMLIT
 # ============================================================
 
 def main():
     st.title("📊 Extractor de Metadatos de Comprobantes")
-    st.markdown("Extrae metadatos estructurados sin errores de lectura de caracteres o desalineación de columnas.")
+    st.markdown("Procesa comprobantes e imágenes para generar un reporte estructurado directamente en formato Excel (`.xlsx`).")
 
     try:
         client = genai.Client(api_key=API_KEY)
@@ -211,7 +202,7 @@ def main():
                 elif data:
                     res_dict = data.model_dump()
                     res_dict["archivo_origen"] = archivo.name
-                    # Limpiar cadenas para evitar saltos de línea destructivos en Excel
+                    # Limpieza de caracteres y saltos de línea destructivos
                     res_dict = {k: limpiar_cadena(v) if isinstance(v, str) else v for k, v in res_dict.items()}
                     resultados.append(res_dict)
             except Exception as ex:
@@ -235,34 +226,21 @@ def main():
             st.subheader("📋 Datos Extraídos")
             st.dataframe(df_resultados, use_container_width=True)
 
-            col_dl1, col_dl2 = st.columns(2)
-
-            with col_dl1:
-                # Codificación UTF-8-SIG para compatibilidad con Excel
-                csv_bytes = df_resultados.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-                st.download_button(
-                    label="📥 Descargar CSV (Compatible con Excel)",
-                    data=csv_bytes,
-                    file_name="metadatos_comprobantes_utf8.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-
-            with col_dl2:
-                # Generación limpia de archivo .xlsx
-                excel_bytes = generar_excel_formateado(df_resultados)
-                st.download_button(
-                    label="📥 Descargar Excel (.xlsx Estructurado)",
-                    data=excel_bytes,
-                    file_name="metadatos_comprobantes.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+            # Generar único archivo Excel estructurado
+            excel_bytes = generar_excel_estructurado(df_resultados)
+            
+            st.download_button(
+                label="📥 Descargar Reporte Excel (.xlsx)",
+                data=excel_bytes,
+                file_name="metadatos_comprobantes.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary"
+            )
 
 if __name__ == "__main__":
     main()
-
-
+    
 
     
 
