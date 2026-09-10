@@ -1,6 +1,7 @@
 streamlit
 pandas
-Pillow
-openpyxl
-pydantic
+pillow
 google-genai
+pydantic
+openpyxl
+xlsxwriter
