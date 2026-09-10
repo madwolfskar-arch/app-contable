@@ -656,14 +656,10 @@ def escribir_bloque_ingresos(ws, df_mes, bloques, columnas_inicio):
 
         if len(filas_disponibles) > 1:
             filas_datos = filas_disponibles[:-1]
-            fila_total_dia = filas_disponibles[-1]
         else:
             filas_datos = filas_disponibles
-            fila_total_dia = None
 
         if len(datos_dia) > len(filas_datos):
-            datos_dia = datos_dia.copy()
-            datos_dia["orden"] = range(len(datos_dia))
             datos_dia = datos_dia.head(len(filas_datos))
 
         for idx, (_, registro) in enumerate(datos_dia.iterrows()):
@@ -690,6 +686,95 @@ def escribir_bloque_ingresos(ws, df_mes, bloques, columnas_inicio):
             )
 
 
+# ============================================================
+# INTERFAZ PRINCIPAL DE STREAMLIT
+# ============================================================
+
+def main():
+    st.title("📊 Procesador Contable de Comprobantes")
+    st.markdown("Extrae la información contable de tus comprobantes e imágenes usando IA.")
+
+    # Inicialización del cliente Gemini
+    try:
+        client = genai.Client(api_key=API_KEY)
+    except Exception as e:
+        st.error(f"Error inicializando cliente de Gemini: {e}")
+        st.stop()
+
+    # Formulario / Entradas de usuario
+    col1, col2 = st.columns(2)
+    with col1:
+        tipo_movimiento = st.selectbox(
+            "Seleccione el tipo de movimiento:",
+            ["Ingreso", "Egreso"]
+        )
+    with col2:
+        tienda_predeterminada = st.text_input(
+            "Identificación del establecimiento (Opcional):",
+            placeholder="Ej. Tienda Central / Sede Norte"
+        )
+
+    archivos_subidos = st.file_uploader(
+        "Cargue los comprobantes (Imágenes PNG, JPG, JPEG):",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True
+    )
+
+    if archivos_subidos:
+        if st.button("🚀 Procesar Comprobantes", type="primary"):
+            resultados = []
+
+            progreso = st.progress(0)
+            status = st.empty()
+
+            total_archivos = len(archivos_subidos)
+
+            for idx, archivo in enumerate(archivos_subidos):
+                status.text(f"Procesando {idx + 1}/{total_archivos}: {archivo.name}")
+
+                try:
+                    imagen = Image.open(archivo)
+                    data, err = procesar_comprobante(
+                        client=client,
+                        image=imagen,
+                        nombre_archivo=archivo.name,
+                        tipo_movimiento=tipo_movimiento,
+                        tienda_predeterminada=tienda_predeterminada
+                    )
+
+                    if err:
+                        st.error(f"Error en '{archivo.name}': {err}")
+                    elif data:
+                        res_dict = data.model_dump()
+                        res_dict["archivo_origen"] = archivo.name
+                        resultados.append(res_dict)
+
+                except Exception as ex:
+                    st.error(f"Error al leer el archivo '{archivo.name}': {ex}")
+
+                progreso.progress((idx + 1) / total_archivos)
+
+            status.text("✅ Procesamiento finalizado.")
+
+            if resultados:
+                df_resultados = pd.DataFrame(resultados)
+                st.subheader("📋 Resultados Extraídos")
+                st.dataframe(df_resultados, use_container_width=True)
+
+                # Descarga CSV
+                csv_data = df_resultados.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Descargar CSV",
+                    data=csv_data,
+                    file_name="comprobantes_procesados.csv",
+                    mime="text/csv"
+                )
+
+
+if __name__ == "__main__":
+    main()
+
+    
 
 
 
