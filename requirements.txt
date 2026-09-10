@@ -3,5 +3,4 @@ pandas
 pillow
 google-genai
 pydantic
-openpyxl
 xlsxwriter
