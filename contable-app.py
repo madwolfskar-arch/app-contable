@@ -252,8 +252,8 @@ def main():
         progreso = st.progress(0)
         status = st.empty()
         
-        # Tamaño de lote optimizado para plan gratuito (4 imágenes por llamada)
-        TAMANO_LOTE = 4
+        # Tamaño de lote optimizado para plan gratuito (5 imágenes por llamada)
+        TAMANO_LOTE = 5
         total_archivos = len(archivos_subidos)
         
         # Divide la lista de archivos en sublistas/lotes
