@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 from io import BytesIO
+from typing import List
 import time
 import re
 
@@ -60,10 +61,11 @@ if not PYDANTIC_OK:
 
 
 # ============================================================
-# ESTRUCTURA DE DATOS EXTRAÍDOS (ESQUEMA PYDANTIC)
+# ESTRUCTURA DE DATOS EXTRAÍDOS (ESQUEMAS PYDANTIC)
 # ============================================================
 
 class ComprobanteData(BaseModel):
+    archivo_origen: str = Field(description="Nombre exacto del archivo cargado asignado a esta imagen.")
     tipo_movimiento: str = Field(description="Debe ser 'Ingreso' o 'Egreso'.")
     concepto_factura: str = Field(description="Número de factura, concepto o descripción principal.")
     destinatario_remitente: str = Field(description="Nombre o razón social de la persona o comercio.")
@@ -74,6 +76,10 @@ class ComprobanteData(BaseModel):
     banco_plataforma: str = Field(description="Entidad financiera o plataforma origen/destino.")
     medio_pago_tipo: str = Field(description="Medio utilizado (Transferencia, QR, Débito, Crédito, etc.).")
     notas_observaciones: str = Field(description="Notas o metadatos adicionales relevantes.")
+
+
+class LoteComprobantesData(BaseModel):
+    comprobantes: List[ComprobanteData] = Field(description="Lista de metadatos extraídos por cada imagen del lote.")
 
 
 # ============================================================
@@ -88,6 +94,21 @@ def limpiar_cadena(texto):
     return str(texto).strip()
 
 
+def optimizar_imagen(archivo_subido, max_dim=1024):
+    """
+    Redimensiona la imagen para optimizar la velocidad de envío y reducir el uso de tokens
+    en el plan gratuito sin sacrificar la legibilidad del texto/OCR.
+    """
+    img = Image.open(archivo_subido)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    
+    ancho, alto = img.size
+    if max(ancho, alto) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    return img
+
+
 def obtener_tiempo_espera(error_msg):
     """Extrae el tiempo de espera recomendado desde la respuesta de error de Gemini."""
     match = re.search(r"retry in\s+(\d+(?:\.\d+)?)s", str(error_msg), re.IGNORECASE)
@@ -96,54 +117,71 @@ def obtener_tiempo_espera(error_msg):
     return 35.0  # Tiempo base de espera si no se encuentra en el texto
 
 
-def procesar_comprobante(client, image, nombre_archivo, tipo_movimiento, tienda_predeterminada=""):
+def procesar_lote_comprobantes(client, lote_archivos, tipo_movimiento, tienda_predeterminada=""):
+    """
+    Procesa un lote de imágenes en una sola llamada de API para maximizar la velocidad
+    y minimizar el consumo de cuotas del plan gratuito.
+    """
+    contents = []
+    nombres_archivos = [arch.name for arch in lote_archivos]
+
+    # Prepares y optimiza cada imagen del lote
+    for arch in lote_archivos:
+        img_opt = optimizar_imagen(arch)
+        contents.append(img_opt)
+
     prompt = f"""
-Analiza detalladamente la imagen del comprobante.
-DATOS DE REFERENCIA:
-- Tipo: {tipo_movimiento}
-- Archivo: "{nombre_archivo}"
+Analiza detalladamente las {len(lote_archivos)} imágenes de comprobantes adjuntas.
+El orden de las imágenes corresponde a la lista de archivos: {nombres_archivos}
+
+DATOS DE REFERENCIA GENERALES:
+- Tipo sugerido: {tipo_movimiento}
 - Establecimiento sugerido: "{tienda_predeterminada}"
 
-INSTRUCCIONES:
-1. Extrae únicamente datos visibles y verificables.
-2. Monto numérico en COP (sin símbolos monetarios ni puntos de miles).
-3. Fecha en formato YYYY-MM-DD HH:MM.
-4. Si un dato no existe, coloca "No identificado".
+INSTRUCCIONES CRÍTICAS:
+1. Genera exactamente un objeto dentro de la lista 'comprobantes' por cada imagen adjunta.
+2. Es OBLIGATORIO asignar en 'archivo_origen' el nombre del archivo correspondiente en el mismo orden.
+3. Extrae únicamente datos visibles y verificables.
+4. Monto numérico en COP (sin símbolos monetarios ni puntos de miles).
+5. Fecha en formato YYYY-MM-DD HH:MM.
+6. Si un dato no existe, coloca "No identificado".
 """
+    contents.append(prompt)
     max_intentos = 3
 
     for intento in range(max_intentos):
         try:
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
-                contents=[image, prompt],
+                contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=ComprobanteData,
+                    response_schema=LoteComprobantesData,
                     temperature=0.1
                 )
             )
             parsed = getattr(response, "parsed", None)
             if parsed is not None:
-                data = parsed if isinstance(parsed, ComprobanteData) else ComprobanteData.model_validate(parsed)
+                data = parsed if isinstance(parsed, LoteComprobantesData) else LoteComprobantesData.model_validate(parsed)
             else:
                 texto_respuesta = getattr(response, "text", "")
-                data = ComprobanteData.model_validate_json(texto_respuesta)
-            return data, None
+                data = LoteComprobantesData.model_validate_json(texto_respuesta)
+            
+            return [c.model_dump() for c in data.comprobantes], None
 
         except Exception as e:
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                 if intento < max_intentos - 1:
                     espera = obtener_tiempo_espera(error_str)
-                    st.warning(f"⚠️ Límite de tasa detectado en '{nombre_archivo}'. Esperando {espera:.1f} segundos...")
+                    st.warning(f"⚠️ Límite de cuota detectado. Esperando {espera:.1f} segundos para reintentar...")
                     time.sleep(espera)
                     continue
                 else:
-                    return None, f"❌ Cuota diaria o de tasa excedida (429 RESOURCE_EXHAUSTED). Intente más tarde o revise su plan en Google AI Studio."
+                    return None, f"❌ Cuota diaria o de tasa excedida (429 RESOURCE_EXHAUSTED). Intente más tarde o reduzca el número de archivos."
             return None, error_str
 
-    return None, f"❌ No se pudo procesar la imagen '{nombre_archivo}'."
+    return None, "❌ No se pudo procesar el lote de imágenes."
 
 
 def generar_excel_estructurado(df):
@@ -185,7 +223,7 @@ def generar_excel_estructurado(df):
 
 def main():
     st.title("📊 Extractor de Metadatos de Comprobantes")
-    st.markdown("Procesa comprobantes e imágenes para generar un reporte estructurado directamente en formato Excel (`.xlsx`).")
+    st.markdown("Procesa múltiples comprobantes e imágenes optimizados para el **Plan Gratuito de Gemini**, generando un reporte estructurado en Excel (`.xlsx`).")
 
     try:
         client = genai.Client(api_key=API_KEY)
@@ -205,65 +243,72 @@ def main():
         accept_multiple_files=True
     )
 
-    if archivos_subidos and st.button("🚀 Analizar Comprobantes", type="primary"):
-        resultados = []
+    # Estado de la sesión para mantener los resultados si se vuelve a renderizar
+    if "resultados" not in st.session_state:
+        st.session_state["resultados"] = []
+
+    if archivos_subidos and st.button("🚀 Analizar Comprobantes en Lotes", type="primary"):
+        st.session_state["resultados"] = []
         progreso = st.progress(0)
         status = st.empty()
-        total = len(archivos_subidos)
+        
+        # Tamaño de lote optimizado para plan gratuito (4 imágenes por llamada)
+        TAMANO_LOTE = 4
+        total_archivos = len(archivos_subidos)
+        
+        # Divide la lista de archivos en sublistas/lotes
+        lotes = [archivos_subidos[i:i + TAMANO_LOTE] for i in range(0, total_archivos, TAMANO_LOTE)]
+        procesados_count = 0
 
-        for idx, archivo in enumerate(archivos_subidos):
-            status.text(f"Analizando ({idx + 1}/{total}): {archivo.name}")
-            try:
-                imagen = Image.open(archivo)
-                data, err = procesar_comprobante(client, imagen, archivo.name, tipo_movimiento, tienda_predeterminada)
-                if err:
-                    st.error(f"Error en '{archivo.name}': {err}")
-                elif data:
-                    res_dict = data.model_dump()
-                    res_dict["archivo_origen"] = archivo.name
+        for idx, lote in enumerate(lotes):
+            nombres_lote = ", ".join([a.name for a in lote])
+            status.text(f"Procesando lote {idx + 1}/{len(lotes)} ({len(lote)} archivos): [{nombres_lote}]")
+            
+            items_extraidos, err = procesar_lote_comprobantes(client, lote, tipo_movimiento, tienda_predeterminada)
+            
+            if err:
+                st.error(f"Error en lote {idx + 1}: {err}")
+            elif items_extraidos:
+                for res_dict in items_extraidos:
                     res_dict = {k: limpiar_cadena(v) if isinstance(v, str) else v for k, v in res_dict.items()}
-                    resultados.append(res_dict)
-            except Exception as ex:
-                st.error(f"Error abriendo '{archivo.name}': {ex}")
+                    st.session_state["resultados"].append(res_dict)
 
-            progreso.progress((idx + 1) / total)
-            # Pausa de 3 segundos entre archivos para evitar exceder el límite por minuto
-            time.sleep(3)
+            procesados_count += len(lote)
+            progreso.progress(procesados_count / total_archivos)
+            
+            # Pausa táctica entre lotes de 4 segundos para respetar el límite de 15 RPM
+            if idx < len(lotes) - 1:
+                time.sleep(4)
 
         status.text("✅ Procesamiento completado.")
 
-        if resultados:
-            df_resultados = pd.DataFrame(resultados)
+    if st.session_state["resultados"]:
+        df_resultados = pd.DataFrame(st.session_state["resultados"])
 
-            columnas_ordenadas = [
-                "archivo_origen", "fecha_hora", "tipo_movimiento", "monto_cop",
-                "destinatario_remitente", "concepto_factura", "tienda_establecimiento",
-                "banco_plataforma", "medio_pago_tipo", "referencia_operacion", "notas_observaciones"
-            ]
-            cols_presentes = [c for c in columnas_ordenadas if c in df_resultados.columns]
-            df_resultados = df_resultados[cols_presentes]
+        columnas_ordenadas = [
+            "archivo_origen", "fecha_hora", "tipo_movimiento", "monto_cop",
+            "destinatario_remitente", "concepto_factura", "tienda_establecimiento",
+            "banco_plataforma", "medio_pago_tipo", "referencia_operacion", "notas_observaciones"
+        ]
+        cols_presentes = [c for c in columnas_ordenadas if c in df_resultados.columns]
+        df_resultados = df_resultados[cols_presentes]
 
-            st.subheader("📋 Datos Extraídos")
-            st.dataframe(df_resultados, use_container_width=True)
+        st.subheader("📋 Datos Extraídos")
+        st.dataframe(df_resultados, use_container_width=True)
 
-            excel_bytes = generar_excel_estructurado(df_resultados)
-            
-            st.download_button(
-                label="📥 Descargar Reporte Excel (.xlsx)",
-                data=excel_bytes,
-                file_name="metadatos_comprobantes.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                type="primary"
-            )
+        excel_bytes = generar_excel_estructurado(df_resultados)
+        
+        st.download_button(
+            label="📥 Descargar Reporte Excel (.xlsx)",
+            data=excel_bytes,
+            file_name="metadatos_comprobantes.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary"
+        )
 
 if __name__ == "__main__":
     main()
-
-
-
-    
-
 
 
 
