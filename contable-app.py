@@ -83,7 +83,7 @@ class LoteComprobantesData(BaseModel):
 
 
 # ============================================================
-# FUNCIONES AUXILIARES
+# FUNCIONES AUXILIARES DE PROCESAMIENTO
 # ============================================================
 
 def limpiar_cadena(texto):
@@ -125,7 +125,7 @@ def procesar_lote_comprobantes(client, lote_archivos, tipo_movimiento, tienda_pr
     contents = []
     nombres_archivos = [arch.name for arch in lote_archivos]
 
-    # Prepares y optimiza cada imagen del lote
+    # Prepara y optimiza cada imagen del lote
     for arch in lote_archivos:
         img_opt = optimizar_imagen(arch)
         contents.append(img_opt)
@@ -178,7 +178,7 @@ INSTRUCCIONES CRÍTICAS:
                     time.sleep(espera)
                     continue
                 else:
-                    return None, f"❌ Cuota diaria o de tasa excedida (429 RESOURCE_EXHAUSTED). Intente más tarde o reduzca el número de archivos."
+                    return None, "❌ Cuota diaria o de tasa excedida (429 RESOURCE_EXHAUSTED). Intente más tarde o reduzca el número de archivos."
             return None, error_str
 
     return None, "❌ No se pudo procesar el lote de imágenes."
@@ -218,19 +218,54 @@ def generar_excel_estructurado(df):
 
 
 # ============================================================
+# SISTEMA DE AUTENTICACIÓN
+# ============================================================
+
+def validar_autenticacion():
+    """Muestra un campo de contraseña para proteger el acceso a la app."""
+    password_secret = st.secrets.get("APP_PASSWORD", "")
+    if not password_secret:
+        return True  # Si no hay contraseña en Secrets, el acceso es libre.
+
+    if "autenticado" not in st.session_state:
+        st.session_state["autenticado"] = False
+
+    if not st.session_state["autenticado"]:
+        st.title("🔒 Acceso Restringido")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            clave_ingresada = st.text_input("🔑 Ingrese la contraseña de acceso:", type="password")
+        if st.button("Ingresar", type="primary"):
+            if clave_ingresada == password_secret:
+                st.session_state["autenticado"] = True
+                st.rerun()
+            else:
+                st.error("❌ Contraseña incorrecta.")
+        return False
+    return True
+
+
+# ============================================================
 # INTERFAZ PRINCIPAL EN STREAMLIT
 # ============================================================
 
 def main():
+    # 1. Control de Autenticación
+    if not validar_autenticacion():
+        st.stop()
+
+    # 2. Encabezado de la Aplicación
     st.title("📊 Extractor de Metadatos de Comprobantes")
     st.markdown("Procesa múltiples comprobantes e imágenes optimizados para el **Plan Gratuito de Gemini**, generando un reporte estructurado en Excel (`.xlsx`).")
 
+    # 3. Inicialización del Cliente Gemini SDK
     try:
         client = genai.Client(api_key=API_KEY)
     except Exception as e:
-        st.error(f"Error al inicializar cliente Gemini: {e}")
+        st.error(f"Error al inicializar el cliente Gemini: {e}")
         st.stop()
 
+    # 4. Formulario de Parámetros
     col1, col2 = st.columns(2)
     with col1:
         tipo_movimiento = st.selectbox("Tipo de movimiento predeterminado:", ["Ingreso", "Egreso"])
@@ -243,20 +278,18 @@ def main():
         accept_multiple_files=True
     )
 
-    # Estado de la sesión para mantener los resultados si se vuelve a renderizar
+    # Estado de la sesión para persisitir resultados entre renderizados
     if "resultados" not in st.session_state:
         st.session_state["resultados"] = []
 
+    # 5. Ejecución del Análisis
     if archivos_subidos and st.button("🚀 Analizar Comprobantes en Lotes", type="primary"):
         st.session_state["resultados"] = []
         progreso = st.progress(0)
         status = st.empty()
         
-        # Tamaño de lote optimizado para plan gratuito (5 imágenes por llamada)
-        TAMANO_LOTE = 5
+        TAMANO_LOTE = 5  # Tamaño de lote optimizado
         total_archivos = len(archivos_subidos)
-        
-        # Divide la lista de archivos en sublistas/lotes
         lotes = [archivos_subidos[i:i + TAMANO_LOTE] for i in range(0, total_archivos, TAMANO_LOTE)]
         procesados_count = 0
 
@@ -276,12 +309,13 @@ def main():
             procesados_count += len(lote)
             progreso.progress(procesados_count / total_archivos)
             
-            # Pausa táctica entre lotes de 4 segundos para respetar el límite de 15 RPM
+            # Pausa táctica de 4s entre lotes para mantenerse bajo el límite de 15 RPM
             if idx < len(lotes) - 1:
                 time.sleep(4)
 
         status.text("✅ Procesamiento completado.")
 
+    # 6. Muestra de Resultados y Descarga
     if st.session_state["resultados"]:
         df_resultados = pd.DataFrame(st.session_state["resultados"])
 
@@ -307,9 +341,9 @@ def main():
             type="primary"
         )
 
+
 if __name__ == "__main__":
     main()
-
 
 
 
